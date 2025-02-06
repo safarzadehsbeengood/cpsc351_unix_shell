@@ -46,7 +46,7 @@ void rsh_loop(void) {
   } while (status);
 }
 
-int main(int argc, char **argv) {
+int main() {
 
   rsh_loop();
 
