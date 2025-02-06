@@ -1,6 +1,6 @@
 CC = clang 
 CFLAGS = -Wall -Wextra
-SOURCES = src/main.c src/parse.c src/exec.c
+SOURCES = src/rsh.c
 OBJECTS = $(SOURCES:.c=.o)
 TARGET = rsh
 
