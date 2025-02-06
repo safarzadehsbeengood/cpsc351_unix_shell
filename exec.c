@@ -4,11 +4,28 @@
 #include <string.h>
 #include <unistd.h>
 
-int rsh_launch(char **args) {
-  pid_t pid, wpid;
-  int status;
+#define HELP_CMD "help"
+#define HELP_MSG "Type any system command, exit to exit, cd [path] to change directory, or mkdir [dirname] to create a new directory\n"
 
+int rsh_launch(char **args) {
+
+  // cd
+  if (!strncmp(args[0], "cd", strlen("cd"))) {
+    if (chdir(args[1])) printf("cd: no such file or directory \"%s\"\n", args[1]);
+    return 1;
+  }
+
+  // help
+  if (!strncmp(HELP_CMD, args[0], strlen(HELP_CMD))) {
+    printf(HELP_MSG);
+    return 1;
+  }
+
+  // if not help or cd, then a sys cmd
+  pid_t pid;
+  int status;
   pid = fork();
+
   if (pid == 0) { // child
     if (execvp(args[0], args) == -1) {
       perror("rsh");
@@ -18,7 +35,7 @@ int rsh_launch(char **args) {
     perror("rsh");
   } else { // parent
     do {
-      wpid = waitpid(pid, &status, WUNTRACED);
+      waitpid(pid, &status, WUNTRACED);
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
   }
   return 1;
