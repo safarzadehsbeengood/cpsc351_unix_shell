@@ -1,8 +1,11 @@
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <errno.h> 
+#include <stdbool.h>
+#include <limits.h> // PATH_MAX
 
 #define HELP_CMD "help"
 #define HELP_MSG                                                               \
@@ -10,10 +13,11 @@
   "mkdir [dirname] to create a new directory\n"
 #define QUIT_CMD "exit"
 
-#define RSH_RL_BUFSIZE 1024;      // bufsize for reading a line
-#define RSH_TOK_BUFSIZE 64;       // bufsize for tokens
-#define RSH_TOK_DELIM " \t\r\n\a" // delimiters for token separation
-#define PIPE_DELIM "|"            // delimiter for pipe separation
+#define RSH_RL_BUFSIZE 1024
+#define RSH_TOK_BUFSIZE 64
+
+#define RSH_TOK_DELIM " \t\r\n\a"
+#define PIPE_DELIM "|"
 
 // ANSI colors
 #define ANSI_COLOR_RED "\x1b[31m"
@@ -66,17 +70,22 @@ char *rsh_read_line(void) {
 Command *rsh_parse_cmd(char *cmd_str) {
   int bufsize = RSH_TOK_BUFSIZE;
   int position = 0;
-  char *token;                                      // current token (word/arg)
-  char **tokens = malloc(sizeof(char *) * bufsize); // allocate tokens
+  char *token;
+  char **tokens = malloc(sizeof(char *) * bufsize);
   if (!tokens) {
     fprintf(stderr, "rsh_parse_cmd: tokens allocation error");
     exit(EXIT_FAILURE);
   }
 
-  // use strtok to separate tokens by delimiters
-  token = strtok(cmd_str, RSH_TOK_DELIM);
+  char *saveptr_cmd;  // for strtok
+  token = strtok_r(cmd_str, RSH_TOK_DELIM, &saveptr_cmd);
   while (token != NULL) {
+    // copy token for storage
     char *token_copy = strdup(token);
+    if (!token_copy) {
+      fprintf(stderr, "strdup error in rsh_parse_cmd");
+      exit(EXIT_FAILURE);
+    }
     tokens[position] = token_copy;
     position++;
 
@@ -88,7 +97,7 @@ Command *rsh_parse_cmd(char *cmd_str) {
         exit(EXIT_FAILURE);
       }
     }
-    token = strtok(NULL, RSH_TOK_DELIM);
+    token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd);
   }
   tokens[position] = NULL;
   Command *cmd = malloc(sizeof(Command));
@@ -100,7 +109,7 @@ Command *rsh_parse_cmd(char *cmd_str) {
   return cmd;
 }
 
-// Splits a line into an instruction
+// splits a line from the user into an instruction
 Instruction *rsh_parse_instruction(char *line) {
   int bufsize = RSH_TOK_BUFSIZE;
   int position = 0;
@@ -115,16 +124,28 @@ Instruction *rsh_parse_instruction(char *line) {
     fprintf(stderr, "rsh: instr commands allocation error");
     exit(EXIT_FAILURE);
   }
-  char *token = strtok(line, PIPE_DELIM);
+
+  instr->has_pipe = strchr(line, '|') != NULL; // set has_pipe
+
+  char *line_copy = strdup(line); // copy for strtok
+  if (!line_copy) {
+    fprintf(stderr, "rsh: line_copy allocation error");
+    exit(EXIT_FAILURE);
+  }
+
+  char *saveptr_instr; // saveptr for strtok_r
+  char *token = strtok_r(line_copy, PIPE_DELIM, &saveptr_instr);
   while (token != NULL) {
-    char *token_copy = strdup(token);
-    if (!token_copy) {
-      fprintf(stderr, "rsh: token_copy allocation error");
-      exit(EXIT_FAILURE);
-    }
-    instr->commands[position] = rsh_parse_cmd(token_copy);
+    // strip whitespace
+    char *start = token;
+    while (*start == ' ') start++; // Trim leading spaces
+
+    char *end = start + strlen(start) - 1;
+    while (end > start && *end == ' ') end--; // Trim trailing spaces
+    *(end + 1) = '\0';
+
+    instr->commands[position] = rsh_parse_cmd(start);
     position++;
-    free(token_copy);
 
     if (position >= bufsize) {
       bufsize += RSH_TOK_BUFSIZE;
@@ -134,21 +155,27 @@ Instruction *rsh_parse_instruction(char *line) {
         exit(EXIT_FAILURE);
       }
     }
-    token = strtok(NULL, PIPE_DELIM);
+    token = strtok_r(NULL, PIPE_DELIM, &saveptr_instr);
   }
   instr->commands[position] = NULL;
+  free(line_copy); // Free the duplicated line
   return instr;
 }
 
 /* ---------------------------------------------------------------- EXECUTION
  * -----------------------------------------------------------------------------------------
  */
-int rsh_launch(int in, int out, Command *cmd) {
 
+int rsh_launch(Command *cmd) {
   // cd
   if (!strncmp(cmd->argv[0], "cd", strlen("cd"))) {
-    if (chdir(cmd->argv[1]))
-      printf("cd: no such file or directory \"%s\"\n", cmd->argv[1]);
+    if (cmd->argv[1] == NULL) {
+      fprintf(stderr, "rsh: expected argument to \"cd\"\n");
+    } else {
+      if (chdir(cmd->argv[1]) != 0) {
+        perror("rsh");
+      }
+    }
     return 1;
   }
 
@@ -161,47 +188,121 @@ int rsh_launch(int in, int out, Command *cmd) {
   // if not help or cd, then a sys cmd
   pid_t pid;
   int status;
-  pid = fork();
 
-  if (pid == 0) { // child
+  pid = fork();
+  if (pid == 0) {
+    // Child process
     if (execvp(cmd->argv[0], cmd->argv) == -1) {
       perror("rsh");
+      exit(EXIT_FAILURE);
     }
-    exit(EXIT_FAILURE);
-  } else if (pid < 0) { // fork error
+  } else if (pid < 0) {
+    // Error forking
     perror("rsh");
-  } else { // parent
+  } else {
+    // Parent process
     do {
       waitpid(pid, &status, WUNTRACED);
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
   }
+
   return 1;
 }
 
 int rsh_execute(Instruction *instr) {
-  if (instr->commands[0]->argv[0] == NULL) { // empty command
+  if (instr->commands[0]->argv[0] == NULL) {
+    // empty command
     return 1;
   }
-  return rsh_launch(STDIN_FILENO, STDOUT_FILENO, instr->commands[0]);
+
+  if (!instr->has_pipe) {
+    // pimple command execution
+    return rsh_launch(instr->commands[0]);
+  } else {
+    // piped execution
+    int num_commands = 0;
+    while (instr->commands[num_commands] != NULL) {
+      num_commands++;
+    }
+
+    int pipefds[num_commands - 1][2]; // Array to store pipe file descriptors
+
+    // create pipes
+    for (int i = 0; i < num_commands - 1; i++) {
+      if (pipe(pipefds[i]) == -1) {
+        perror("pipe");
+        fprintf(stderr, "Pipe creation failed for command %d: %s\n", i,
+                strerror(errno)); // Add error info
+        return 1;
+      }
+    }
+
+    pid_t pids[num_commands];
+
+    for (int i = 0; i < num_commands; i++) {
+      pids[i] = fork();
+
+      if (pids[i] == 0) { // child
+        
+        // redirect input
+        if (i > 0) {
+          if (dup2(pipefds[i - 1][0], STDIN_FILENO) == -1) {
+            perror("dup2 (stdin)");
+            fprintf(stderr, "dup2 failed for stdin of command %d: %s\n", i,
+                    strerror(errno));
+            exit(EXIT_FAILURE);
+          }
+        }
+
+        // redirect output
+        if (i < num_commands - 1) {
+          if (dup2(pipefds[i][1], STDOUT_FILENO) == -1) {
+            perror("dup2 (stdout)");
+            fprintf(stderr, "dup2 failed for stdout of command %d: %s\n", i,
+                    strerror(errno));
+            exit(EXIT_FAILURE);
+          }
+        }
+
+        // close all pipe fd
+        for (int j = 0; j < num_commands - 1; j++) {
+          close(pipefds[j][0]);
+          close(pipefds[j][1]);
+        }
+
+        // execute the command
+        if (execvp(instr->commands[i]->argv[0], instr->commands[i]->argv) ==
+            -1) {
+          perror("execvp");
+          fprintf(stderr, "Exec failed for command %d: %s\n", i,
+                  strerror(errno)); // Add error info
+          exit(EXIT_FAILURE);
+        }
+      } else if (pids[i] < 0) {
+        // error forking
+        perror("fork");
+        return 1;
+      }
+    }
+
+    // parent
+    // close all pipe file descriptors
+    for (int i = 0; i < num_commands - 1; i++) {
+      close(pipefds[i][0]);
+      close(pipefds[i][1]);
+    }
+
+    // wait for all children
+    for (int i = 0; i < num_commands; i++) {
+      wait(NULL);
+    }
+  }
+
+  return 1;
 }
 
 /* ------------------------------------------------------ UTILS/TESTING
  * -------------------------------------------------------------- */
-
-void print_instruction(Instruction *instr) {
-  for (int i = 0; instr->commands[i] != NULL; i++) {
-    for (int j = 0; instr->commands[i]->argv[j] != NULL; j++) {
-      char *arg = instr->commands[i]->argv[j];
-      printf("instr %d cmd %d arg: %s\n", i, j, arg);
-    }
-  }
-}
-
-void print_cmd(Command *cmd) {
-  for (int i = 0; cmd->argv[i] != NULL; i++) {
-    printf("arg %d: %s\n", i, cmd->argv[i]);
-  }
-}
 
 void free_cmd(Command *cmd) {
   if (!cmd) return;
@@ -213,6 +314,7 @@ void free_cmd(Command *cmd) {
 }
 
 void free_instr(Instruction *instr) {
+  if (!instr) return;
   for (int i = 0; instr->commands[i] != NULL; i++) {
     free_cmd(instr->commands[i]);
   }
@@ -220,34 +322,23 @@ void free_instr(Instruction *instr) {
   free(instr);
 }
 
-void test_cmd() {
-  char *cmd = strdup("ls -l -a");
-  if (!cmd) {
-    fprintf(stderr, "strdup error");
-    exit(EXIT_FAILURE);
+// current working directory
+void print_prompt() {
+  char cwd[PATH_MAX];
+  if (getcwd(cwd, sizeof(cwd)) != NULL) {
+    char *last_slash = strrchr(cwd, '/');
+    if (last_slash != NULL) {
+      printf(ANSI_COLOR_CYAN "%s " ANSI_COLOR_RESET, last_slash + 1);
+    } else {
+      printf("%s", cwd);
+    }
+  } else {
+    perror("getcwd() error");
   }
-  Command *res = rsh_parse_cmd(cmd);
-  print_cmd(res);
-  free(cmd);
-  free_cmd(res);
 }
 
-void test_instr() {
-  // test rsh_split_command
-  char *test_line = strdup("ls -l -a | grep test");
-  if (!test_line) {
-    fprintf(stderr, "strdup error");
-    exit(EXIT_FAILURE);
-  }
-
-  printf("test line: %s\n", test_line);
-  Instruction *instr = rsh_parse_instruction(test_line);
-  print_instruction(instr);
-  free_instr(instr);
-  free(test_line);
-}
-
-/* ---------------------------------------------------------------------------------- MAIN --------------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------------- MAIN
+ * --------------------------------------------------------------------------------- */
 
 void rsh_loop(void) {
   char *line;
@@ -260,10 +351,8 @@ void rsh_loop(void) {
          "\"exit\" to exit!\n");
 
   do {
-    // char* cwd = getcwd(&cwd_buf, PATH_MAX);
-    // printf("%s > ", cwd);
-    printf(ANSI_COLOR_GREEN "$ > " ANSI_COLOR_RESET);
 
+    print_prompt();
     line = rsh_read_line();
 
     // quit
@@ -281,8 +370,6 @@ void rsh_loop(void) {
 }
 
 int main() {
-  // test_cmd();
-  // test_instr();
   rsh_loop();
   return 0;
 }
