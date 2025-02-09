@@ -37,12 +37,12 @@
     - has_pipe
 */
 
-// command struct
+// stores a single command (no pipes) 
 struct {
   char **argv;
 } typedef Command;
 
-// Stores an instruction (whatever the user typed)
+// stores an instruction (whatever the user typed), can have multiple commands
 struct {
   Command **commands;
   bool has_pipe;
@@ -191,16 +191,16 @@ int rsh_launch(Command *cmd) {
 
   pid = fork();
   if (pid == 0) {
-    // Child process
+    // child
     if (execvp(cmd->argv[0], cmd->argv) == -1) {
       perror("rsh");
       exit(EXIT_FAILURE);
     }
   } else if (pid < 0) {
-    // Error forking
+    // error forking
     perror("rsh");
   } else {
-    // Parent process
+    // parent
     do {
       waitpid(pid, &status, WUNTRACED);
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
@@ -215,24 +215,24 @@ int rsh_execute(Instruction *instr) {
     return 1;
   }
 
+  // no pipe
   if (!instr->has_pipe) {
-    // pimple command execution
     return rsh_launch(instr->commands[0]);
   } else {
-    // piped execution
+    // pipe execution
     int num_commands = 0;
     while (instr->commands[num_commands] != NULL) {
       num_commands++;
     }
 
-    int pipefds[num_commands - 1][2]; // Array to store pipe file descriptors
+    int pipefds[num_commands - 1][2]; // need n-1 pipes for n commands
 
     // create pipes
     for (int i = 0; i < num_commands - 1; i++) {
       if (pipe(pipefds[i]) == -1) {
         perror("pipe");
         fprintf(stderr, "Pipe creation failed for command %d: %s\n", i,
-                strerror(errno)); // Add error info
+                strerror(errno)); 
         return 1;
       }
     }
