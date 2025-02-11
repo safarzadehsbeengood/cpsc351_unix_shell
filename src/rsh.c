@@ -1,11 +1,11 @@
+#include <errno.h>
+#include <limits.h> // PATH_MAX
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/wait.h>
-#include <errno.h> 
-#include <stdbool.h>
-#include <limits.h> // PATH_MAX
+#include <unistd.h>
 
 #define HELP_CMD "help"
 #define HELP_MSG                                                               \
@@ -37,7 +37,7 @@
     - has_pipe
 */
 
-// stores a single command (no pipes) 
+// stores a single command (no pipes)
 struct {
   char **argv;
 } typedef Command;
@@ -77,7 +77,7 @@ Command *rsh_parse_cmd(char *cmd_str) {
     exit(EXIT_FAILURE);
   }
 
-  char *saveptr_cmd;  // for strtok
+  char *saveptr_cmd; // for strtok
   token = strtok_r(cmd_str, RSH_TOK_DELIM, &saveptr_cmd);
   while (token != NULL) {
     // copy token for storage
@@ -138,10 +138,12 @@ Instruction *rsh_parse_instruction(char *line) {
   while (token != NULL) {
     // strip whitespace
     char *start = token;
-    while (*start == ' ') start++; // Trim leading spaces
+    while (*start == ' ')
+      start++; // Trim leading spaces
 
     char *end = start + strlen(start) - 1;
-    while (end > start && *end == ' ') end--; // Trim trailing spaces
+    while (end > start && *end == ' ')
+      end--; // Trim trailing spaces
     *(end + 1) = '\0';
 
     instr->commands[position] = rsh_parse_cmd(start);
@@ -232,18 +234,22 @@ int rsh_execute(Instruction *instr) {
       if (pipe(pipefds[i]) == -1) {
         perror("pipe");
         fprintf(stderr, "Pipe creation failed for command %d: %s\n", i,
-                strerror(errno)); 
+                strerror(errno));
         return 1;
       }
     }
 
     pid_t pids[num_commands];
 
+    printf(ANSI_COLOR_RED "PIPELINE: " ANSI_COLOR_RESET);
+
     for (int i = 0; i < num_commands; i++) {
+      if (i > 0)
+        printf(ANSI_COLOR_YELLOW "PIPE %s " ANSI_COLOR_RESET,
+               instr->commands[i]->argv[0]);
       pids[i] = fork();
 
       if (pids[i] == 0) { // child
-        
         // redirect input
         if (i > 0) {
           if (dup2(pipefds[i - 1][0], STDIN_FILENO) == -1) {
@@ -274,7 +280,7 @@ int rsh_execute(Instruction *instr) {
         if (execvp(instr->commands[i]->argv[0], instr->commands[i]->argv) ==
             -1) {
           perror("execvp");
-          fprintf(stderr, "Exec failed for command %d: %s\n", i,
+          fprintf(stderr, "exec failed for command %d: %s\n", i,
                   strerror(errno)); // Add error info
           exit(EXIT_FAILURE);
         }
@@ -296,6 +302,7 @@ int rsh_execute(Instruction *instr) {
     for (int i = 0; i < num_commands; i++) {
       wait(NULL);
     }
+    printf("\n");
   }
 
   return 1;
@@ -305,7 +312,8 @@ int rsh_execute(Instruction *instr) {
  * -------------------------------------------------------------- */
 
 void free_cmd(Command *cmd) {
-  if (!cmd) return;
+  if (!cmd)
+    return;
   for (int i = 0; cmd->argv[i] != NULL; i++) {
     free(cmd->argv[i]);
   }
@@ -314,7 +322,8 @@ void free_cmd(Command *cmd) {
 }
 
 void free_instr(Instruction *instr) {
-  if (!instr) return;
+  if (!instr)
+    return;
   for (int i = 0; instr->commands[i] != NULL; i++) {
     free_cmd(instr->commands[i]);
   }
@@ -337,8 +346,10 @@ void print_prompt() {
   }
 }
 
-/* ---------------------------------------------------------------------------------- MAIN
- * --------------------------------------------------------------------------------- */
+/* ----------------------------------------------------------------------------------
+ * MAIN
+ * ---------------------------------------------------------------------------------
+ */
 
 void rsh_loop(void) {
   char *line;
