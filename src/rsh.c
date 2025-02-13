@@ -74,7 +74,6 @@ char *rsh_read_line(void) {
 Command *rsh_parse_cmd(char *cmd_str) {
   int bufsize = RSH_TOK_BUFSIZE;
   int position = 0;
-  printf("cmd_str: %s\n", cmd_str);
   char *token;
   char **tokens = malloc(sizeof(char *) * bufsize);
   char *output_file = NULL;
