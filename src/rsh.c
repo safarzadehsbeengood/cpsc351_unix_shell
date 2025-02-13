@@ -39,14 +39,18 @@
 
 // stores a single command (no pipes)
 struct {
-  char **argv;
+  char **argv; // array of arguments example (ls -l => argv[0] = ls, argv[1] =
+               // -l, argv[2] = NULL)
+  char *output_file; // Stores filename for output redirection
+  bool append;       // True for >> (append), False for > (overwrite)
 } typedef Command;
 
 // stores an instruction (whatever the user typed), can have multiple commands
 struct {
-  Command **commands;
-  bool has_pipe;
-  char *redirect_stream;
+  Command **
+      commands; // holds multiple commands: example: for ls | grep .c ->
+                // commands[0] = {"ls", NULL},commands[1] = {"grep", ".c", NULL}
+  bool has_pipe; // true if user command has a pipe
 } typedef Instruction;
 
 // func to read a line from the user during main loop
@@ -70,18 +74,35 @@ char *rsh_read_line(void) {
 Command *rsh_parse_cmd(char *cmd_str) {
   int bufsize = RSH_TOK_BUFSIZE;
   int position = 0;
+  printf("cmd_str: %s\n", cmd_str);
   char *token;
   char **tokens = malloc(sizeof(char *) * bufsize);
+  char *output_file = NULL;
+  bool append = false;
   if (!tokens) {
     fprintf(stderr, "rsh_parse_cmd: tokens allocation error");
     exit(EXIT_FAILURE);
   }
 
-  char *saveptr_cmd; // for strtok
-  token = strtok_r(cmd_str, RSH_TOK_DELIM, &saveptr_cmd);
+  char *saveptr_cmd; // for strtok_r to save where it is
+  token = strtok_r(cmd_str, RSH_TOK_DELIM,
+                   &saveptr_cmd); // splits cmd_str into tokens
   while (token != NULL) {
+    // finds > or >> and stores the filename to write or append to
+    if (strcmp(token, ">") == 0 ||
+        strcmp(token, ">>") == 0) {        // if ">" or ">>" is found in token
+      append = (strcmp(token, ">>") == 0); // True if >>, else false
+      token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd);
+      if (token == NULL) {
+        fprintf(stderr, "rsh: syntax error near redirection\n");
+        exit(EXIT_FAILURE);
+      }
+      output_file = strdup(token); // set input after > as output_file
+      break;                       // Stop processing further tokens
+    }
+
     // copy token for storage
-    char *token_copy = strdup(token);
+    char *token_copy = strdup(token); // makes a copy of the token
     if (!token_copy) {
       fprintf(stderr, "strdup error in rsh_parse_cmd");
       exit(EXIT_FAILURE);
@@ -97,7 +118,9 @@ Command *rsh_parse_cmd(char *cmd_str) {
         exit(EXIT_FAILURE);
       }
     }
-    token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd);
+    token = strtok_r(NULL, RSH_TOK_DELIM,
+                     &saveptr_cmd); // incroments the next thing in cmd_str
+                                    // based off RSH_TOK_DELIM
   }
   tokens[position] = NULL;
   Command *cmd = malloc(sizeof(Command));
@@ -106,6 +129,8 @@ Command *rsh_parse_cmd(char *cmd_str) {
     exit(EXIT_FAILURE);
   }
   cmd->argv = tokens;
+  cmd->output_file = output_file;
+  cmd->append = append;
   return cmd;
 }
 
@@ -194,9 +219,22 @@ int rsh_launch(Command *cmd) {
   pid = fork();
   if (pid == 0) {
     // child
+    FILE *fd;
+    if (cmd->output_file) { // checks if there is an output file
+      printf("OPEN file: %s\n", cmd->output_file);
+      if (cmd->append) {
+        fd = fopen(cmd->output_file, "a"); // appends
+      } else {
+        fd = fopen(cmd->output_file, "w"); // writes
+      }
+      dup2(fileno(fd), STDOUT_FILENO); // makes it so it prints to a file
+    }
+
     if (execvp(cmd->argv[0], cmd->argv) == -1) {
       perror("rsh");
       exit(EXIT_FAILURE);
+    } else {
+      fclose(fd);
     }
   } else if (pid < 0) {
     // error forking
@@ -276,6 +314,16 @@ int rsh_execute(Instruction *instr) {
           close(pipefds[j][1]);
         }
 
+        FILE *fd;
+        if (instr->commands[i]->output_file) {
+          if (instr->commands[i]->append) {
+            fd = fopen(instr->commands[i]->output_file, "a"); // appends
+          } else {
+            fd = fopen(instr->commands[i]->output_file, "w"); // writes
+          }
+          dup2(fileno(fd), STDOUT_FILENO); // makes it so it prints to a file
+        }
+
         // execute the command
         if (execvp(instr->commands[i]->argv[0], instr->commands[i]->argv) ==
             -1) {
@@ -283,6 +331,9 @@ int rsh_execute(Instruction *instr) {
           fprintf(stderr, "exec failed for command %d: %s\n", i,
                   strerror(errno)); // Add error info
           exit(EXIT_FAILURE);
+        }
+        if (instr->commands[i]->output_file) {
+          fclose(fd);
         }
       } else if (pids[i] < 0) {
         // error forking
@@ -318,6 +369,7 @@ void free_cmd(Command *cmd) {
     free(cmd->argv[i]);
   }
   free(cmd->argv);
+  free(cmd->output_file);
   free(cmd);
 }
 
