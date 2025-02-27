@@ -29,7 +29,6 @@
 #define ANSI_COLOR_RESET "\x1b[0m"
 
 /* ---------------------------------------------------------------- PARSING
-  ----------------------------------------------------------------------------------------------
   Instruction
     - Command (if more than one, pipe)
       - Arguments
@@ -42,7 +41,9 @@ struct {
   char **argv; // array of arguments example (ls -l => argv[0] = ls, argv[1] =
                // -l, argv[2] = NULL)
   char *output_file; // Stores filename for output redirection
+  char *input_file;
   bool append;       // True for >> (append), False for > (overwrite)
+  bool execute;
 } typedef Command;
 
 // stores an instruction (whatever the user typed), can have multiple commands
@@ -51,6 +52,7 @@ struct {
       commands; // holds multiple commands: example: for ls | grep .c ->
                 // commands[0] = {"ls", NULL},commands[1] = {"grep", ".c", NULL}
   bool has_pipe; // true if user command has a pipe
+  bool execute;
 } typedef Instruction;
 
 // func to read a line from the user during main loop
@@ -77,6 +79,7 @@ Command *rsh_parse_cmd(char *cmd_str) {
   char *token;
   char **tokens = malloc(sizeof(char *) * bufsize);
   char *output_file = NULL;
+  char *input_file = NULL;
   bool append = false;
   if (!tokens) {
     fprintf(stderr, "rsh_parse_cmd: tokens allocation error");
@@ -87,6 +90,18 @@ Command *rsh_parse_cmd(char *cmd_str) {
   token = strtok_r(cmd_str, RSH_TOK_DELIM,
                    &saveptr_cmd); // splits cmd_str into tokens
   while (token != NULL) {
+
+    if (strcmp(token, "<") == 0) {
+      token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd);
+      if (token == NULL) {
+        fprintf(stderr, "rsh: syntax error near input redirect\n");
+        exit(EXIT_FAILURE);
+      }
+      input_file = strdup(token);
+      token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd);
+      continue;
+    }
+
     // finds > or >> and stores the filename to write or append to
     if (strcmp(token, ">") == 0 ||
         strcmp(token, ">>") == 0) {        // if ">" or ">>" is found in token
@@ -97,7 +112,7 @@ Command *rsh_parse_cmd(char *cmd_str) {
         exit(EXIT_FAILURE);
       }
       output_file = strdup(token); // set input after > as output_file
-      break;                       // Stop processing further tokens
+      break;                       // stop processing tokens
     }
 
     // copy token for storage
@@ -123,13 +138,24 @@ Command *rsh_parse_cmd(char *cmd_str) {
   }
   tokens[position] = NULL;
   Command *cmd = malloc(sizeof(Command));
+
   if (!cmd) {
     fprintf(stderr, "rsh: cmd allocation error");
     exit(EXIT_FAILURE);
   }
+
   cmd->argv = tokens;
   cmd->output_file = output_file;
+  cmd->input_file = input_file;
   cmd->append = append;
+  cmd->execute = true;
+
+  // handle echo
+  if (!strcmp(tokens[position - 1], "ECHO") || !strcmp(tokens[position-1], "PIPE")) {
+    cmd->execute = false;
+    free(cmd->argv[position-1]);
+    cmd->argv[position - 1] = NULL;
+  }
   return cmd;
 }
 
@@ -143,7 +169,10 @@ Instruction *rsh_parse_instruction(char *line) {
     fprintf(stderr, "rsh: instr allocation error");
     exit(EXIT_FAILURE);
   }
+
+  instr->execute = true;
   instr->commands = malloc(sizeof(Command *) * bufsize);
+
   if (!instr->commands) {
     fprintf(stderr, "rsh: instr commands allocation error");
     exit(EXIT_FAILURE);
@@ -171,6 +200,8 @@ Instruction *rsh_parse_instruction(char *line) {
     *(end + 1) = '\0';
 
     instr->commands[position] = rsh_parse_cmd(start);
+    if (!instr->commands[position]->execute)
+      instr->execute = false;
     position++;
 
     if (position >= bufsize) {
@@ -199,7 +230,7 @@ int rsh_launch(Command *cmd) {
       fprintf(stderr, "rsh: expected argument to \"cd\"\n");
     } else {
       if (chdir(cmd->argv[1]) != 0) {
-        perror("rsh");
+        printf("cd: No such file or directory %s\n", cmd->argv[1]);
       }
     }
     return 1;
@@ -218,22 +249,33 @@ int rsh_launch(Command *cmd) {
   pid = fork();
   if (pid == 0) {
     // child
-    FILE *fd;
+    FILE *fd_out = NULL, *fd_in = NULL;
+
+    if (cmd->input_file) {
+      fd_in = fopen(cmd->input_file, "r");
+      if (!fd_in) {
+        fprintf(stderr, "rsh: cannot open input file %s\n", cmd->input_file);
+        exit(EXIT_FAILURE);
+      }
+      dup2(fileno(fd_in), STDIN_FILENO);
+    }
+
     if (cmd->output_file) { // checks if there is an output file
       printf("OPEN file: %s\n", cmd->output_file);
       if (cmd->append) {
-        fd = fopen(cmd->output_file, "a"); // appends
+        fd_out = fopen(cmd->output_file, "a"); // appends
       } else {
-        fd = fopen(cmd->output_file, "w"); // writes
+        fd_out = fopen(cmd->output_file, "w"); // writes
       }
-      dup2(fileno(fd), STDOUT_FILENO); // makes it so it prints to a file
+      dup2(fileno(fd_out), STDOUT_FILENO); // makes it so it prints to a file
     }
 
     if (execvp(cmd->argv[0], cmd->argv) == -1) {
       perror("rsh");
       exit(EXIT_FAILURE);
     } else {
-      fclose(fd);
+      fclose(fd_in);
+      fclose(fd_out);
     }
   } else if (pid < 0) {
     // error forking
@@ -369,6 +411,7 @@ void free_cmd(Command *cmd) {
   }
   free(cmd->argv);
   free(cmd->output_file);
+  free(cmd->input_file);
   free(cmd);
 }
 
@@ -388,13 +431,25 @@ void print_prompt() {
   if (getcwd(cwd, sizeof(cwd)) != NULL) {
     char *last_slash = strrchr(cwd, '/');
     if (last_slash != NULL) {
-      printf(ANSI_COLOR_CYAN "%s " ANSI_COLOR_RESET, last_slash + 1);
+      printf(ANSI_COLOR_CYAN "%s " ANSI_COLOR_RESET "> ", last_slash + 1);
     } else {
       printf("%s", cwd);
     }
   } else {
     perror("getcwd() error");
   }
+}
+
+void print_instr(Instruction *instr) {
+  for (int i = 0; instr->commands[i] != NULL; i++) {
+    if (i != 0) {
+      printf(" PIPE ");
+    }
+    for (int j = 0; instr->commands[i]->argv[j] != NULL; j++) {
+      printf("%s ", instr->commands[i]->argv[j]);
+    }
+  }
+  printf("\n");
 }
 
 /* ----------------------------------------------------------------------------------
@@ -423,7 +478,12 @@ void rsh_loop(void) {
       break;
     }
     instr = rsh_parse_instruction(line);
-    status = rsh_execute(instr);
+    if (instr->execute) {
+      status = rsh_execute(instr);
+    } else {
+      print_instr(instr);
+      status = 1;
+    }
 
     free_instr(instr);
     free(line);
