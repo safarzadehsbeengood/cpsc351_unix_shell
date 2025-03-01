@@ -45,7 +45,7 @@ struct {
                // -l, argv[2] = NULL)
   char *output_file; // Stores filename for output redirection
   char *input_file;
-  bool append;       // True for >> (append), False for > (overwrite)
+  bool append; // True for >> (append), False for > (overwrite)
   bool execute;
 } typedef Command;
 
@@ -90,8 +90,10 @@ Command *rsh_parse_cmd(char *cmd_str) {
   }
 
   char *saveptr_cmd; // for strtok_r to save where it is
+
   token = strtok_r(cmd_str, RSH_TOK_DELIM,
-                   &saveptr_cmd); // splits cmd_str into tokens
+                   &saveptr_cmd); // splits string into tokens for parsing
+
   while (token != NULL) {
 
     if (strcmp(token, "<") == 0) {
@@ -100,8 +102,11 @@ Command *rsh_parse_cmd(char *cmd_str) {
         fprintf(stderr, "rsh: syntax error near input redirect\n");
         exit(EXIT_FAILURE);
       }
-      input_file = strdup(token);
-      token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd);
+
+      input_file = strdup(token);                          // save input file
+      token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd); // get next token
+
+      // only output redirect or pipe should be after <
       continue;
     }
 
@@ -115,7 +120,7 @@ Command *rsh_parse_cmd(char *cmd_str) {
         exit(EXIT_FAILURE);
       }
       output_file = strdup(token); // set input after > as output_file
-      break;                       // stop processing tokens
+      continue; // next token for this command should be null
     }
 
     // copy token for storage
@@ -154,9 +159,11 @@ Command *rsh_parse_cmd(char *cmd_str) {
   cmd->execute = true;
 
   // handle echo
-  if (!strcmp(tokens[position - 1], "ECHO") || !strcmp(tokens[position-1], "PIPE") || !strcmp(tokens[position-1], "IO")) {
+  if (!strcmp(tokens[position - 1], "ECHO") ||
+      !strcmp(tokens[position - 1], "PIPE") ||
+      !strcmp(tokens[position - 1], "IO")) {
     cmd->execute = false;
-    free(cmd->argv[position-1]);
+    free(cmd->argv[position - 1]);
     cmd->argv[position - 1] = NULL;
   }
   return cmd;
@@ -202,11 +209,15 @@ Instruction *rsh_parse_instruction(char *line) {
       end--; // Trim trailing spaces
     *(end + 1) = '\0';
 
+    // parse this command
     instr->commands[position] = rsh_parse_cmd(start);
+    // if any of the commands are set to not execute, do not execute the
+    // instruction
     if (!instr->commands[position]->execute)
       instr->execute = false;
     position++;
 
+    // realloc if needed
     if (position >= bufsize) {
       bufsize += RSH_TOK_BUFSIZE;
       instr->commands = realloc(instr->commands, sizeof(Command *) * bufsize);
@@ -215,10 +226,12 @@ Instruction *rsh_parse_instruction(char *line) {
         exit(EXIT_FAILURE);
       }
     }
+    // get the next command
     token = strtok_r(NULL, PIPE_DELIM, &saveptr_instr);
   }
+  // set end to null
   instr->commands[position] = NULL;
-  free(line_copy); // Free the duplicated line
+  free(line_copy); // free the duplicated line
   return instr;
 }
 
@@ -227,7 +240,7 @@ Instruction *rsh_parse_instruction(char *line) {
  */
 
 int rsh_launch(Command *cmd) {
-  // cd
+  // cd handle
   if (!strncmp(cmd->argv[0], "cd", strlen("cd"))) {
     if (cmd->argv[1] == NULL) {
       fprintf(stderr, "rsh: expected argument to \"cd\"\n");
@@ -239,7 +252,7 @@ int rsh_launch(Command *cmd) {
     return 1;
   }
 
-  // help
+  // help handle
   if (!strncmp(HELP_CMD, cmd->argv[0], strlen(HELP_CMD))) {
     printf(HELP_MSG);
     return 1;
@@ -308,6 +321,7 @@ int rsh_execute(Instruction *instr) {
   } else {
     // pipe execution
     int num_commands = 0;
+    // get number of commands
     while (instr->commands[num_commands] != NULL) {
       num_commands++;
     }
@@ -360,7 +374,8 @@ int rsh_execute(Instruction *instr) {
         if (i == 0 && instr->commands[i]->input_file) {
           FILE *fd_in = fopen(instr->commands[i]->input_file, "r");
           if (!fd_in) {
-            fprintf(stderr, "rsh: cannot open input file %s\n", instr->commands[i]->input_file);
+            fprintf(stderr, "rsh: cannot open input file %s\n",
+                    instr->commands[i]->input_file);
             exit(EXIT_FAILURE);
           }
           dup2(fileno(fd_in), STDIN_FILENO);
@@ -376,7 +391,8 @@ int rsh_execute(Instruction *instr) {
             fd = fopen(instr->commands[i]->output_file, "w"); // writes
           }
           if (!fd) {
-            fprintf(stderr, "rsh: cannot open output file %s\n", instr->commands[i]->output_file);
+            fprintf(stderr, "rsh: cannot open output file %s\n",
+                    instr->commands[i]->output_file);
             exit(EXIT_FAILURE);
           }
           dup2(fileno(fd), STDOUT_FILENO);
@@ -384,9 +400,11 @@ int rsh_execute(Instruction *instr) {
         }
 
         // execute the command
-        if (execvp(instr->commands[i]->argv[0], instr->commands[i]->argv) == -1) {
+        if (execvp(instr->commands[i]->argv[0], instr->commands[i]->argv) ==
+            -1) {
           perror("execvp");
-          fprintf(stderr, "exec failed for command %d: %s\n", i, strerror(errno));
+          fprintf(stderr, "exec failed for command %d: %s\n", i,
+                  strerror(errno));
           exit(EXIT_FAILURE);
         }
       } else if (pids[i] < 0) {
@@ -454,24 +472,27 @@ void print_prompt() {
   }
 }
 
-void print_cmd(Command* cmd) {
+void print_cmd(Command *cmd) {
   for (int i = 0; cmd->argv[i] != NULL; i++) {
     if (i == 0) {
-      printf(ANSI_COLOR_GREEN "%s " ANSI_COLOR_RESET, cmd->argv[i]);
+      fprintf(stderr, ANSI_COLOR_GREEN "%s " ANSI_COLOR_RESET, cmd->argv[i]);
     } else {
-      printf("%s ", cmd->argv[i]);
+      fprintf(stderr, "%s ", cmd->argv[i]);
     }
   }
-  if (cmd->input_file) printf(ANSI_COLOR_RED "LT " ANSI_COLOR_RESET "%s ", cmd->input_file);
-  if (cmd->output_file) printf(ANSI_COLOR_RED "GT " ANSI_COLOR_RESET "%s ", cmd->output_file);
+  if (cmd->input_file)
+    fprintf(stderr, ANSI_COLOR_RED "LT " ANSI_COLOR_RESET "%s ", cmd->input_file);
+  if (cmd->output_file)
+    fprintf(stderr, ANSI_COLOR_RED "GT " ANSI_COLOR_RESET "%s ", cmd->output_file);
 }
 
-void print_instr(Instruction* instr) {
+void print_instr(Instruction *instr) {
   for (int i = 0; instr->commands[i] != NULL; i++) {
-    if (i != 0) printf(ANSI_COLOR_CYAN " PIPE " ANSI_COLOR_RESET);
+    if (i != 0)
+      fprintf(stderr, ANSI_COLOR_CYAN " PIPE " ANSI_COLOR_RESET);
     print_cmd(instr->commands[i]);
   }
-  printf("\n");
+  fprintf(stderr, "\n");
 }
 
 /* ----------------------------------------------------------------------------------
@@ -500,6 +521,7 @@ void rsh_loop(void) {
       break;
     }
     instr = rsh_parse_instruction(line);
+    fprintf(stderr, "Execute -> %d\n", instr->execute);
     if (instr->execute) {
       status = rsh_execute(instr);
     } else {
