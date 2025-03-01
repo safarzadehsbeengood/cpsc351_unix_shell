@@ -455,17 +455,23 @@ void print_prompt() {
 }
 
 void print_cmd(Command* cmd) {
-  printf("------------------------------\n");
   for (int i = 0; cmd->argv[i] != NULL; i++) {
-    printf("%s ", cmd->argv[i]);
+    if (i == 0) {
+      printf(ANSI_COLOR_GREEN "%s " ANSI_COLOR_RESET, cmd->argv[i]);
+    } else {
+      printf("%s ", cmd->argv[i]);
+    }
   }
-  printf("\ninput: %s\noutput: %s\n", cmd->input_file, cmd->output_file);
+  if (cmd->input_file) printf(ANSI_COLOR_RED "LT " ANSI_COLOR_RESET "%s ", cmd->input_file);
+  if (cmd->output_file) printf(ANSI_COLOR_RED "GT " ANSI_COLOR_RESET "%s ", cmd->output_file);
 }
 
 void print_instr(Instruction* instr) {
   for (int i = 0; instr->commands[i] != NULL; i++) {
+    if (i != 0) printf(ANSI_COLOR_CYAN " PIPE " ANSI_COLOR_RESET);
     print_cmd(instr->commands[i]);
   }
+  printf("\n");
 }
 
 /* ----------------------------------------------------------------------------------
@@ -494,10 +500,10 @@ void rsh_loop(void) {
       break;
     }
     instr = rsh_parse_instruction(line);
-    print_instr(instr);
     if (instr->execute) {
       status = rsh_execute(instr);
     } else {
+      print_instr(instr);
       status = 1;
     }
 
