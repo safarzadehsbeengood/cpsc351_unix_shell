@@ -32,8 +32,11 @@
   Instruction
     - Command (if more than one, pipe)
       - Arguments
-    - Redirect Stream (NULL by default)
-    - has_pipe
+      - Redirect Stream (input)
+      - Redirect Stream (output)
+      - Execute (should this be executed)
+    - has_pipe (contains a pipe?)
+    - Execute
 */
 
 // stores a single command (no pipes)
@@ -151,7 +154,7 @@ Command *rsh_parse_cmd(char *cmd_str) {
   cmd->execute = true;
 
   // handle echo
-  if (!strcmp(tokens[position - 1], "ECHO") || !strcmp(tokens[position-1], "PIPE")) {
+  if (!strcmp(tokens[position - 1], "ECHO") || !strcmp(tokens[position-1], "PIPE") || !strcmp(tokens[position-1], "IO")) {
     cmd->execute = false;
     free(cmd->argv[position-1]);
     cmd->argv[position - 1] = NULL;
@@ -258,24 +261,26 @@ int rsh_launch(Command *cmd) {
         exit(EXIT_FAILURE);
       }
       dup2(fileno(fd_in), STDIN_FILENO);
+      fclose(fd_in);
     }
 
     if (cmd->output_file) { // checks if there is an output file
-      printf("OPEN file: %s\n", cmd->output_file);
       if (cmd->append) {
         fd_out = fopen(cmd->output_file, "a"); // appends
       } else {
         fd_out = fopen(cmd->output_file, "w"); // writes
       }
+      if (!fd_out) {
+        fprintf(stderr, "rsh: cannot open output file %s\n", cmd->output_file);
+        exit(EXIT_FAILURE);
+      }
       dup2(fileno(fd_out), STDOUT_FILENO); // makes it so it prints to a file
+      fclose(fd_out);
     }
 
     if (execvp(cmd->argv[0], cmd->argv) == -1) {
       perror("rsh");
       exit(EXIT_FAILURE);
-    } else {
-      fclose(fd_in);
-      fclose(fd_out);
     }
   } else if (pid < 0) {
     // error forking
@@ -290,6 +295,7 @@ int rsh_launch(Command *cmd) {
   return 1;
 }
 
+// creates a pipeline if needed and executes an instruction
 int rsh_execute(Instruction *instr) {
   if (instr->commands[0]->argv[0] == NULL) {
     // empty command
@@ -320,12 +326,7 @@ int rsh_execute(Instruction *instr) {
 
     pid_t pids[num_commands];
 
-    printf(ANSI_COLOR_RED "PIPELINE: " ANSI_COLOR_RESET);
-
     for (int i = 0; i < num_commands; i++) {
-      if (i > 0)
-        printf(ANSI_COLOR_YELLOW "PIPE %s " ANSI_COLOR_RESET,
-               instr->commands[i]->argv[0]);
       pids[i] = fork();
 
       if (pids[i] == 0) { // child
@@ -355,26 +356,38 @@ int rsh_execute(Instruction *instr) {
           close(pipefds[j][1]);
         }
 
-        FILE *fd;
+        // Handle input redirection for the first command
+        if (i == 0 && instr->commands[i]->input_file) {
+          FILE *fd_in = fopen(instr->commands[i]->input_file, "r");
+          if (!fd_in) {
+            fprintf(stderr, "rsh: cannot open input file %s\n", instr->commands[i]->input_file);
+            exit(EXIT_FAILURE);
+          }
+          dup2(fileno(fd_in), STDIN_FILENO);
+          fclose(fd_in);
+        }
+
+        // Handle output redirection for the last command
         if (instr->commands[i]->output_file) {
+          FILE *fd;
           if (instr->commands[i]->append) {
             fd = fopen(instr->commands[i]->output_file, "a"); // appends
           } else {
             fd = fopen(instr->commands[i]->output_file, "w"); // writes
           }
-          dup2(fileno(fd), STDOUT_FILENO); // makes it so it prints to a file
+          if (!fd) {
+            fprintf(stderr, "rsh: cannot open output file %s\n", instr->commands[i]->output_file);
+            exit(EXIT_FAILURE);
+          }
+          dup2(fileno(fd), STDOUT_FILENO);
+          fclose(fd);
         }
 
         // execute the command
-        if (execvp(instr->commands[i]->argv[0], instr->commands[i]->argv) ==
-            -1) {
+        if (execvp(instr->commands[i]->argv[0], instr->commands[i]->argv) == -1) {
           perror("execvp");
-          fprintf(stderr, "exec failed for command %d: %s\n", i,
-                  strerror(errno)); // Add error info
+          fprintf(stderr, "exec failed for command %d: %s\n", i, strerror(errno));
           exit(EXIT_FAILURE);
-        }
-        if (instr->commands[i]->output_file) {
-          fclose(fd);
         }
       } else if (pids[i] < 0) {
         // error forking
@@ -394,7 +407,6 @@ int rsh_execute(Instruction *instr) {
     for (int i = 0; i < num_commands; i++) {
       wait(NULL);
     }
-    printf("\n");
   }
 
   return 1;
@@ -403,6 +415,7 @@ int rsh_execute(Instruction *instr) {
 /* ------------------------------------------------------ UTILS/TESTING
  * -------------------------------------------------------------- */
 
+// free a command
 void free_cmd(Command *cmd) {
   if (!cmd)
     return;
@@ -415,6 +428,7 @@ void free_cmd(Command *cmd) {
   free(cmd);
 }
 
+// free an instruction
 void free_instr(Instruction *instr) {
   if (!instr)
     return;
@@ -425,7 +439,7 @@ void free_instr(Instruction *instr) {
   free(instr);
 }
 
-// current working directory
+// print current working directory (not absolute)
 void print_prompt() {
   char cwd[PATH_MAX];
   if (getcwd(cwd, sizeof(cwd)) != NULL) {
@@ -440,16 +454,18 @@ void print_prompt() {
   }
 }
 
-void print_instr(Instruction *instr) {
-  for (int i = 0; instr->commands[i] != NULL; i++) {
-    if (i != 0) {
-      printf(" PIPE ");
-    }
-    for (int j = 0; instr->commands[i]->argv[j] != NULL; j++) {
-      printf("%s ", instr->commands[i]->argv[j]);
-    }
+void print_cmd(Command* cmd) {
+  printf("------------------------------\n");
+  for (int i = 0; cmd->argv[i] != NULL; i++) {
+    printf("%s ", cmd->argv[i]);
   }
-  printf("\n");
+  printf("\ninput: %s\noutput: %s\n", cmd->input_file, cmd->output_file);
+}
+
+void print_instr(Instruction* instr) {
+  for (int i = 0; instr->commands[i] != NULL; i++) {
+    print_cmd(instr->commands[i]);
+  }
 }
 
 /* ----------------------------------------------------------------------------------
@@ -478,10 +494,10 @@ void rsh_loop(void) {
       break;
     }
     instr = rsh_parse_instruction(line);
+    print_instr(instr);
     if (instr->execute) {
       status = rsh_execute(instr);
     } else {
-      print_instr(instr);
       status = 1;
     }
 
