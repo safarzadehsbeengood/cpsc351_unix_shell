@@ -105,8 +105,6 @@ Command *rsh_parse_cmd(char *cmd_str) {
 
       input_file = strdup(token);                          // save input file
       token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd); // get next token
-
-      // only output redirect or pipe should be after <
       continue;
     }
 
@@ -120,7 +118,8 @@ Command *rsh_parse_cmd(char *cmd_str) {
         exit(EXIT_FAILURE);
       }
       output_file = strdup(token); // set input after > as output_file
-      continue; // next token for this command should be null
+      token = strtok_r(NULL, RSH_TOK_DELIM, &saveptr_cmd);
+      continue;
     }
 
     // copy token for storage
@@ -521,7 +520,6 @@ void rsh_loop(void) {
       break;
     }
     instr = rsh_parse_instruction(line);
-    fprintf(stderr, "Execute -> %d\n", instr->execute);
     if (instr->execute) {
       status = rsh_execute(instr);
     } else {
